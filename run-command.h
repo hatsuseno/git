@@ -64,9 +64,11 @@ int run_command(struct child_process *);
  * overwritten by further calls to find_hook and run_hook_*.
  */
 extern const char *find_hook(const char *name);
+extern int check_hook_access(const char *path);
 LAST_ARG_MUST_BE_NULL
 extern int run_hook_le(const char *const *env, const char *name, ...);
 extern int run_hook_ve(const char *const *env, const char *name, va_list args);
+extern int run_hook_cmd(const char *const *env, const char *cmd_path, va_list args);
 
 #define RUN_COMMAND_NO_STDIN 1
 #define RUN_GIT_CMD	     2	/*If this is to be git sub-command */

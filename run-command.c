@@ -1252,46 +1252,106 @@ const char *find_hook(const char *name)
 
 	strbuf_reset(&path);
 	strbuf_git_path(&path, "hooks/%s", name);
-	if (access(path.buf, X_OK) < 0) {
-		int err = errno;
 
-#ifdef STRIP_EXTENSION
-		strbuf_addstr(&path, STRIP_EXTENSION);
-		if (access(path.buf, X_OK) >= 0)
-			return path.buf;
-		if (errno == EACCES)
-			err = errno;
-#endif
-
-		if (err == EACCES && advice_ignored_hook) {
-			static struct string_list advise_given = STRING_LIST_INIT_DUP;
-
-			if (!string_list_lookup(&advise_given, name)) {
-				string_list_insert(&advise_given, name);
-				advise(_("The '%s' hook was ignored because "
-					 "it's not set as executable.\n"
-					 "You can disable this warning with "
-					 "`git config advice.ignoredHook false`."),
-				       path.buf);
-			}
-		}
-		return NULL;
+	if (check_hook_access(path.buf)) {
+		return path.buf;
 	}
-	return path.buf;
+
+	return NULL;
 }
 
-int run_hook_ve(const char *const *env, const char *name, va_list args)
+int check_hook_access(const char *path)
 {
-	struct child_process hook = CHILD_PROCESS_INIT;
+	if (access(path, X_OK) >= 0)
+		return 1;
+
+	if (errno == EACCES && advice_ignored_hook) {
+		static struct string_list advise_given = STRING_LIST_INIT_DUP;
+
+		if (!string_list_lookup(&advise_given, path)) {
+			string_list_insert(&advise_given, path);
+			advise(_("The '%s' hook was ignored because "
+				 "it's not set as executable.\n"
+				 "You can disable this warning with "
+				 "`git config advice.ignoredHook false`."),
+				   path);
+		}
+	}
+
+	return 0;
+}
+
+int run_hook_ve(const char *const *env, const char *name, va_list hook_args)
+{
+	va_list args;
 	const char *p;
+	struct dirent *de;
+	DIR *hooksd_dir;
+	static struct strbuf hooksd_path = STRBUF_INIT;
+	static struct strbuf hooksd_script = STRBUF_INIT;
+	int hook_retval;
 
 	p = find_hook(name);
-	if (!p)
+
+	/* no script, and not configured to use hooks.d -> early return */
+	if (!p && !enable_hooksd)
 		return 0;
 
-	argv_array_push(&hook.args, p);
-	while ((p = va_arg(args, const char *)))
-		argv_array_push(&hook.args, p);
+	if (p) {
+		va_copy(args, hook_args);
+		hook_retval = run_hook_cmd(env, p, args);
+		va_end(args);
+
+		if (hook_retval)
+			return hook_retval;
+	}
+
+	strbuf_reset(&hooksd_path);
+	strbuf_git_path(&hooksd_path, "hooks/%s.d", name);
+	
+	if ((hooksd_dir = opendir(hooksd_path.buf)) == NULL) {
+		return 0;
+	}
+
+	while ((de = readdir(hooksd_dir)) != NULL) {
+		struct stat stbuf;
+
+		strbuf_reset(&hooksd_script);
+		strbuf_addf(&hooksd_script, "%s/%s", hooksd_path.buf, de->d_name);
+
+		if (stat(hooksd_script.buf, &stbuf) == -1) {
+			continue;
+		}
+
+		if ((stbuf.st_mode & S_IFMT) == S_IFDIR) {
+			continue;
+		}
+
+		if (check_hook_access(hooksd_script.buf)) {
+			va_copy(args, hook_args);
+			hook_retval = run_hook_cmd(env, hooksd_script.buf, args);
+			va_end(args);
+
+			strbuf_release(&hooksd_script);
+
+			if (hook_retval)
+				return hook_retval;
+		} else {
+			strbuf_release(&hooksd_script);
+		}
+	}
+
+	return 0;
+}
+
+int run_hook_cmd(const char *const *env, const char *path, va_list args)
+{
+	struct child_process hook = CHILD_PROCESS_INIT;
+	const char *arg;
+
+	argv_array_push(&hook.args, path);
+	while ((arg = va_arg(args, const char *)))
+		argv_array_push(&hook.args, arg);
 	hook.env = env;
 	hook.no_stdin = 1;
 	hook.stdout_to_stderr = 1;
